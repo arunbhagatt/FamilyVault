@@ -17,7 +17,7 @@ public class MainActivity extends BridgeActivity {
         // including Android versions that enforce edge-to-edge by default.
         View webView = getBridge().getWebView();
         ViewCompat.setOnApplyWindowInsetsListener(webView, (view, windowInsets) -> {
-            Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars());
+            Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars() | WindowInsetsCompat.Type.displayCutout());
             view.setPadding(
                 view.getPaddingLeft(),
                 bars.top,
