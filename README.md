@@ -129,9 +129,9 @@ If you find a bug or have an idea for improvement, please open an issue in the r
 
 ## 📄 License
 
-No open-source licence has been selected yet. All rights are reserved unless a licence is added to this repository.
+MIT License
+Copyright (c) 2026 arunbhagatt
 
----
 
 **FamilyVault**  
 *Your family's important records, organised in one place.*
