@@ -146,65 +146,178 @@ function App() {
 }
 
 function FamilyTree({ members, relations, onSelect }: { members: Person[]; relations: Link[]; onSelect: (m: Person) => void }) {
-  if (!members.length) return <div className="tree-empty">Add family members and connect them to build your family tree.</div>;
   const [treeScale, setTreeScale] = useState(1);
-  const treePointers = useRef(new Map<number, {x:number;y:number}>());
-  const pinchDistance = (a: {x:number;y:number}, b: {x:number;y:number}) => Math.hypot(a.x-b.x, a.y-b.y);
+  const treePointers = useRef(new Map<number, { x: number; y: number }>());
   const lastPinch = useRef<number | null>(null);
-  const lastPan = useRef<{x:number;y:number} | null>(null);
+  const lastPan = useRef<{ x: number; y: number } | null>(null);
+  const pinchDistance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
+
+  const memberIds = new Set(members.map(m => m.id));
   const parentEdges = relations.flatMap(r => {
-    if (r.type === 'Father' || r.type === 'Mother' || r.type === 'Parent') return [{ parent: r.a, child: r.b }];
-    if (r.type === 'Daughter' || r.type === 'Son' || r.type === 'Child') return [{ parent: r.b, child: r.a }];
+    if (['Father', 'Mother', 'Parent'].includes(r.type)) return [{ parent: r.a, child: r.b }];
+    if (['Daughter', 'Son', 'Child'].includes(r.type)) return [{ parent: r.b, child: r.a }];
     if (r.type === 'Grandparent') return [{ parent: r.a, child: r.b }];
     return [];
-  }).filter(e => members.some(m => m.id === e.parent) && members.some(m => m.id === e.child));
+  }).filter(e => memberIds.has(e.parent) && memberIds.has(e.child) && e.parent !== e.child);
+
+  const spouseRelations = relations.filter(r => ['Husband', 'Wife', 'Spouse'].includes(r.type) && memberIds.has(r.a) && memberIds.has(r.b) && r.a !== r.b);
   const parentMap = new Map<string, string[]>();
-  parentEdges.forEach(e => parentMap.set(e.child, [...(parentMap.get(e.child) || []), e.parent]));
   const childrenMap = new Map<string, string[]>();
-  parentEdges.forEach(e => childrenMap.set(e.parent, [...(childrenMap.get(e.parent) || []), e.child]));
-  const roots = members.filter(m => !(parentMap.get(m.id) || []).length);
+  parentEdges.forEach(e => {
+    parentMap.set(e.child, [...(parentMap.get(e.child) || []), e.parent]);
+    childrenMap.set(e.parent, [...(childrenMap.get(e.parent) || []), e.child]);
+  });
+
+  // A spouse pair is one visual family unit. This keeps partners adjacent rather than
+  // allowing alphabetical sorting to scatter them across the generation.
+  const leader = new Map(members.map(m => [m.id, m.id]));
+  const find = (id: string): string => {
+    const p = leader.get(id) || id;
+    if (p === id) return id;
+    const root = find(p); leader.set(id, root); return root;
+  };
+  const unite = (a: string, b: string) => { const ra = find(a), rb = find(b); if (ra !== rb) leader.set(rb, ra); };
+  spouseRelations.forEach(r => unite(r.a, r.b));
+
   const levels = new Map<string, number>();
+  const roots = members.filter(m => !(parentMap.get(m.id) || []).length);
   const assign = (id: string, level: number, path = new Set<string>()) => {
     if (path.has(id)) return;
-    const old = levels.get(id);
-    if (old !== undefined && old >= level) return;
+    const previous = levels.get(id);
+    if (previous !== undefined && previous >= level) return;
     levels.set(id, level);
-    const nextPath = new Set(path); nextPath.add(id);
-    (childrenMap.get(id) || []).forEach(child => assign(child, level + 1, nextPath));
+    const next = new Set(path); next.add(id);
+    (childrenMap.get(id) || []).forEach(child => assign(child, level + 1, next));
   };
   (roots.length ? roots : members.slice(0, 1)).forEach(m => assign(m.id, 0));
   members.forEach(m => { if (!levels.has(m.id)) levels.set(m.id, 0); });
-  // Keep peer relationships on the same generation where possible.
-  let changed = true, guard = 0;
-  while (changed && guard++ < members.length) {
+
+  // Spouses must occupy the same generation. Propagate this before building rows.
+  let changed = true, pass = 0;
+  while (changed && pass++ < members.length + 1) {
     changed = false;
-    relations.filter(r => ['Brother','Sister','Friend','Husband','Wife','Sibling','Spouse'].includes(r.type)).forEach(r => {
-      const a = levels.get(r.a), b = levels.get(r.b);
-      if (a === undefined || b === undefined) return;
-      const level = Math.max(a, b);
-      if (a !== level) { levels.set(r.a, level); changed = true; }
-      if (b !== level) { levels.set(r.b, level); changed = true; }
+    spouseRelations.forEach(r => {
+      const level = Math.max(levels.get(r.a) || 0, levels.get(r.b) || 0);
+      if (levels.get(r.a) !== level) { levels.set(r.a, level); changed = true; }
+      if (levels.get(r.b) !== level) { levels.set(r.b, level); changed = true; }
     });
   }
+
   const maxLevel = Math.max(0, ...levels.values());
-  const rows = Array.from({ length: maxLevel + 1 }, (_, level) => members.filter(m => levels.get(m.id) === level));
-  const nodeW = 190, nodeH = 88, colGap = 38, rowGap = 150, pad = 30;
-  const width = Math.max(640, ...rows.map(row => row.length * (nodeW + colGap) + pad * 2 - colGap));
-  const height = pad * 2 + rows.length * rowGap;
+  const nodeW = 166, nodeH = 82, memberGap = 22, unitGap = 58, rowGap = 166, pad = 34;
+  const rows: Person[][][] = [];
+  const previousPositionsForLevel = new Map<string, number>();
+  for (let level = 0; level <= maxLevel; level++) {
+    const atLevel = members.filter(m => levels.get(m.id) === level);
+    const groups = new Map<string, Person[]>();
+    atLevel.forEach(m => {
+      const key = find(m.id);
+      groups.set(key, [...(groups.get(key) || []), m]);
+    });
+    const units = [...groups.values()];
+    units.forEach(unit => unit.sort((a, b) => a.name.localeCompare(b.name)));
+    if (level > 0) {
+      const previousPositions = new Map<string, number>();
+      // Parent-centred ordering keeps each branch close to its parents.
+      units.sort((a, b) => {
+        const parentCenter = (unit: Person[]) => {
+          const ids = [...new Set(unit.flatMap(m => parentMap.get(m.id) || []))];
+          const xs = ids.map(id => previousPositions.get(id)).filter((x): x is number => x !== undefined);
+          return xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : Number.POSITIVE_INFINITY;
+        };
+        return parentCenter(a) - parentCenter(b) || a[0].name.localeCompare(b[0].name);
+      });
+    }
+    rows.push(units);
+    // Seed positions for this row for ordering the next generation.
+    let cursor = pad;
+    units.forEach(unit => {
+      unit.forEach(m => { previousPositionsForLevel.set(m.id, cursor + nodeW / 2); cursor += nodeW + memberGap; });
+      cursor += unitGap - memberGap;
+    });
+  }
+
+  // Recompute row positions in a stable, centred layout.
   const positions = new Map<string, { x: number; y: number }>();
-  rows.forEach((row, ri) => {
-    const total = row.length * (nodeW + colGap) - colGap;
-    const left = Math.max(pad, (width - total) / 2);
-    row.forEach((m, i) => positions.set(m.id, { x: left + i * (nodeW + colGap), y: pad + ri * rowGap }));
+  const rowWidths = rows.map(units => units.reduce((sum, unit) => sum + unit.length * nodeW + Math.max(0, unit.length - 1) * memberGap, 0) + Math.max(0, units.length - 1) * unitGap);
+  const width = Math.max(640, ...rowWidths) + pad * 2;
+  rows.forEach((units, ri) => {
+    const total = rowWidths[ri];
+    let x = Math.max(pad, (width - total) / 2);
+    units.forEach(unit => {
+      unit.forEach(m => { positions.set(m.id, { x, y: pad + ri * rowGap }); x += nodeW + memberGap; });
+      x += unitGap - memberGap;
+    });
   });
-  const peerRelations = relations.filter(r => ['Brother','Sister','Friend','Husband','Wife','Sibling','Spouse'].includes(r.type));
-  return <div className="tree-scroll" onPointerDown={e => { if (e.pointerType !== 'touch') return; treePointers.current.set(e.pointerId,{x:e.clientX,y:e.clientY}); if(treePointers.current.size===2){const pts=[...treePointers.current.values()];lastPinch.current=pinchDistance(pts[0],pts[1]);lastPan.current=null;}else{lastPan.current={x:e.clientX,y:e.clientY};} }} onPointerMove={e => { if(e.pointerType!=='touch'||!treePointers.current.has(e.pointerId))return; const prev=treePointers.current.get(e.pointerId)!; treePointers.current.set(e.pointerId,{x:e.clientX,y:e.clientY}); if(treePointers.current.size>=2){const pts=[...treePointers.current.values()];const d=pinchDistance(pts[0],pts[1]);if(lastPinch.current&&d>0){const ratio=d/lastPinch.current; if(Math.abs(ratio-1)>.003)setTreeScale(v=>Math.max(.4,Math.min(2.6,v*ratio)));}lastPinch.current=d;}else if(lastPan.current){const dx=e.clientX-prev.x,dy=e.clientY-prev.y;e.currentTarget.scrollLeft-=dx;e.currentTarget.scrollTop-=dy;lastPan.current={x:e.clientX,y:e.clientY};} }} onPointerUp={e=>{treePointers.current.delete(e.pointerId);if(treePointers.current.size<2)lastPinch.current=null;if(treePointers.current.size===1){lastPan.current=[...treePointers.current.values()][0];}else lastPan.current=null;}} onPointerCancel={e=>{treePointers.current.delete(e.pointerId);lastPinch.current=null;lastPan.current=null;}}><div className="tree-zoom-controls"><button onClick={() => setTreeScale(v => Math.max(.45, +(v-.1).toFixed(2)))}>−</button><span>{Math.round(treeScale*100)}%</span><button onClick={() => setTreeScale(v => Math.min(2.2, +(v+.1).toFixed(2)))}>+</button><button onClick={() => setTreeScale(1)}>Reset</button></div><div style={{ width: width*treeScale, height: height*treeScale, position:'relative' }}><div className="tree-canvas" style={{ width, height, transform:`scale(${treeScale})`, transformOrigin:'top left' }}>
-    <svg className="tree-lines" width={width} height={height}>
-      {parentEdges.map((e, i) => { const a = positions.get(e.parent), b = positions.get(e.child); if (!a || !b) return null; const x1 = a.x + nodeW / 2, y1 = a.y + nodeH, x2 = b.x + nodeW / 2, y2 = b.y; const mid = y1 + Math.max(22, (y2-y1)/2); return <path key={`p${i}`} d={`M ${x1} ${y1} V ${mid} H ${x2} V ${y2}`} />; })}
-      {peerRelations.map((r, i) => { const a = positions.get(r.a), b = positions.get(r.b); if (!a || !b || a.y !== b.y) return null; return <path className="tree-peer-line" key={`peer${i}`} d={`M ${a.x + nodeW/2} ${a.y + nodeH/2} H ${b.x + nodeW/2}`} />; })}
-    </svg>
-    {members.map(m => { const p = positions.get(m.id)!; const connected = relations.filter(r => r.a === m.id || r.b === m.id).map(r => { const otherId = r.a === m.id ? r.b : r.a; const other = members.find(x => x.id === otherId); return other ? `${r.a === m.id ? r.type : inverseRelation(r.type)} of ${other.name}` : ''; }).filter(Boolean); return <button key={m.id} className="tree-node" style={{ left:p.x, top:p.y, width:nodeW, height:nodeH }} onClick={() => onSelect(m)}><b>{m.name}</b><small>{m.label || 'Family member'}</small>{connected[0] && <em>{connected[0]}</em>}</button>; })}
-  </div></div></div>;
+  const height = pad * 2 + rows.length * rowGap;
+  const siblingGroups = new Map<string, { parents: string[]; children: string[] }>();
+  members.forEach(child => {
+    const parents = [...new Set(parentMap.get(child.id) || [])].sort();
+    if (!parents.length) return;
+    const key = parents.join('|');
+    const group = siblingGroups.get(key) || { parents, children: [] };
+    group.children.push(child.id); siblingGroups.set(key, group);
+  });
+
+  if (!members.length) return <div className="tree-empty">Add family members and connect them to build your family tree.</div>;
+
+  return <div className="tree-scroll"
+    onPointerDown={e => {
+      if (e.pointerType !== 'touch') return;
+      treePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (treePointers.current.size === 2) { const pts = [...treePointers.current.values()]; lastPinch.current = pinchDistance(pts[0], pts[1]); lastPan.current = null; }
+      else lastPan.current = { x: e.clientX, y: e.clientY };
+    }}
+    onPointerMove={e => {
+      if (e.pointerType !== 'touch' || !treePointers.current.has(e.pointerId)) return;
+      const previous = treePointers.current.get(e.pointerId)!;
+      treePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (treePointers.current.size >= 2) {
+        const pts = [...treePointers.current.values()], distance = pinchDistance(pts[0], pts[1]);
+        if (lastPinch.current && distance > 0) { const ratio = distance / lastPinch.current; if (Math.abs(ratio - 1) > .003) setTreeScale(v => Math.max(.4, Math.min(2.6, v * ratio))); }
+        lastPinch.current = distance;
+      } else if (lastPan.current) {
+        e.currentTarget.scrollLeft -= e.clientX - previous.x;
+        e.currentTarget.scrollTop -= e.clientY - previous.y;
+        lastPan.current = { x: e.clientX, y: e.clientY };
+      }
+    }}
+    onPointerUp={e => { treePointers.current.delete(e.pointerId); if (treePointers.current.size < 2) lastPinch.current = null; lastPan.current = treePointers.current.size === 1 ? [...treePointers.current.values()][0] : null; }}
+    onPointerCancel={e => { treePointers.current.delete(e.pointerId); lastPinch.current = null; lastPan.current = null; }}>
+    <div className="tree-zoom-controls"><button onClick={() => setTreeScale(v => Math.max(.45, +(v - .1).toFixed(2)))}>−</button><span>{Math.round(treeScale * 100)}%</span><button onClick={() => setTreeScale(v => Math.min(2.2, +(v + .1).toFixed(2)))}>+</button><button onClick={() => setTreeScale(1)}>Reset</button></div>
+    <div style={{ width: width * treeScale, height: height * treeScale, position: 'relative' }}>
+      <div className="tree-canvas" style={{ width, height, transform: `scale(${treeScale})`, transformOrigin: 'top left' }}>
+        <svg className="tree-lines" width={width} height={height}>
+          {spouseRelations.map((r, i) => {
+            const a = positions.get(r.a), b = positions.get(r.b);
+            if (!a || !b || a.y !== b.y) return null;
+            const left = Math.min(a.x, b.x), right = Math.max(a.x, b.x);
+            return <path className="tree-peer-line" key={`spouse-${i}`} d={`M ${left + nodeW} ${a.y + nodeH / 2} H ${right}`} />;
+          })}
+          {[...siblingGroups.values()].map((group, i) => {
+            const parents = group.parents.map(id => positions.get(id)).filter((p): p is { x: number; y: number } => !!p);
+            const children = group.children.map(id => positions.get(id)).filter((p): p is { x: number; y: number } => !!p);
+            if (!parents.length || !children.length) return null;
+            const parentX = parents.reduce((sum, p) => sum + p.x + nodeW / 2, 0) / parents.length;
+            const parentBottom = Math.max(...parents.map(p => p.y + nodeH));
+            const childTop = Math.min(...children.map(p => p.y));
+            const branchY = parentBottom + Math.max(22, (childTop - parentBottom) * .48);
+            const childXs = children.map(p => p.x + nodeW / 2);
+            const minX = Math.min(parentX, ...childXs), maxX = Math.max(parentX, ...childXs);
+            return <path key={`family-${i}`} d={`M ${parentX} ${parentBottom} V ${branchY} M ${minX} ${branchY} H ${maxX} ${childXs.map(x => `M ${x} ${branchY} V ${childTop}`).join(' ')}`} />;
+          })}
+        </svg>
+        {members.map(m => {
+          const p = positions.get(m.id)!;
+          const connected = relations.filter(r => r.a === m.id || r.b === m.id).map(r => {
+            const otherId = r.a === m.id ? r.b : r.a, other = members.find(x => x.id === otherId);
+            return other ? `${r.a === m.id ? r.type : inverseRelation(r.type)} of ${other.name}` : '';
+          }).filter(Boolean);
+          return <button key={m.id} className="tree-node" style={{ left: p.x, top: p.y, width: nodeW, height: nodeH }} onClick={() => onSelect(m)}><b>{m.name}</b><small>{m.label || 'Family member'}</small>{connected[0] && <em>{connected[0]}</em>}</button>;
+        })}
+      </div>
+    </div>
+  </div>;
 }
 function inverseRelation(r: string) {
   const map: Record<string,string> = { Daughter:'Parent', Son:'Parent', Father:'Child', Mother:'Child', Brother:'Sibling', Sister:'Sibling', Husband:'Wife', Wife:'Husband', Parent:'Child', Child:'Parent', Grandparent:'Grandchild', Spouse:'Spouse', Sibling:'Sibling' };
